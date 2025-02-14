@@ -14,6 +14,9 @@ st.set_page_config(page_title="AI Chart Generator", layout="wide")
 with st.sidebar:
     st.header("配置")
     api_key = st.text_input("DeepSeek API密钥", type="password")
+    #proxy_url = st.text_input("代理地址 (可选)", 
+    #                        value="http://127.0.0.1:7890",
+    #                        help="格式：http://ip:port")
     base_url = "https://api.deepseek.com/"
     #blockchair_key = st.text_input("Blockchair API Key", type="password", 
     #                             help="从blockchair.com获取免费API密钥")
@@ -40,16 +43,47 @@ def fetch_bitcoin_data(metric, days=30):
     }
     
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(
+            url, 
+            params=params,
+            proxies={
+                "http": "http://127.0.0.1:7890",
+                "https": "http://127.0.0.1:7890"
+            },
+            verify=False  # 如果使用自签名证书需要此项
+        )
         response.raise_for_status()
+        raw_data = response.json().get('data')
         
         # 处理空数据情况
-        if not response.json().get('data'):
+        if not raw_data:
             st.warning("所选日期范围内无可用数据")
             return pd.DataFrame(columns=['date', 'transaction_count', 'size'])
             
         # ... 原有数据处理代码 ...
-        
+        # 新增数据处理代码
+        processed_data = []
+        for date_str, daily_data in raw_data.items():
+            try:
+                # 转换日期格式
+                date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                
+                # 提取交易数量和区块大小（单位转换为MB）
+                transaction_count = daily_data.get('transactions', 0)
+                block_size = round(daily_data.get('size', 0) / (1024 * 1024), 2)  # 字节转MB
+                
+                processed_data.append({
+                    'date': date,
+                    'transaction_count': transaction_count,
+                    'size': block_size
+                })
+            except (ValueError, TypeError) as e:
+                st.warning(f"数据解析错误：{str(e)}")
+                continue
+                
+        df = pd.DataFrame(processed_data)
+        df.sort_values('date', inplace=True)  # 按日期排序
+        return df        
     except requests.exceptions.HTTPError as e:
         error_msg = response.json().get('message', '未知错误')
         st.error(f"API请求失败 ({e.response.status_code}): {error_msg}")
