@@ -7,6 +7,9 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 import pytz
+# 增加TCP保持活动设置
+import socket
+import httpx
 # 初始化配置
 st.set_page_config(page_title="AI Chart Generator", layout="wide")
 
@@ -110,7 +113,7 @@ def fetch_bitcoin_data(metric, days=30):
     for block in all_blocks:
         try:
             # 转换时间戳为日期（UTC时区）
-            block_date = datetime.utcfromtimestamp(block['time']).date()
+            block_date = datetime.fromtimestamp(block['time']).date()
             
             processed_data.append({
                 'date': block_date,
@@ -139,9 +142,33 @@ user_input = st.chat_input("用自然语言描述您需要的图表...")
 if user_input:
     with st.status("生成图表中..."):
         # 初始化OpenAI客户端
+        # 修改OpenAI客户端配置
+        timeout = httpx.Timeout(
+            connect=20.0,  # 连接超时延长到20秒
+            read=30.0,     # 读取超时30秒
+            write=30.0,    # 写入超时30秒
+            pool=10.0      # 连接池超时10秒
+        )
         client = openai.OpenAI(
             api_key=api_key,
-            base_url=base_url
+            base_url=base_url,
+            http_client=httpx.Client(
+                timeout=timeout,
+                socket_options=[
+                    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+                    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+                    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+                    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                ],
+                proxies={
+                    "http://": proxy_url,
+                    "https://": proxy_url
+                } if proxy_url else None,
+                timeout=30.0,
+                limits=httpx.Limits(max_connections=5),  # 限制并发连接
+                transport=httpx.HTTPTransport(retries=3), # 设置重试次数
+                verify=False  # 禁用SSL验证
+            )
         )
         
         # 构造请求
