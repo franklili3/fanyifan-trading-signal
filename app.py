@@ -13,81 +13,124 @@ st.set_page_config(page_title="AI Chart Generator", layout="wide")
 # 侧边栏配置
 with st.sidebar:
     st.header("配置")
-    api_key = st.text_input("DeepSeek API密钥", type="password")
-    #proxy_url = st.text_input("代理地址 (可选)", 
-    #                        value="http://127.0.0.1:7890",
-    #                        help="格式：http://ip:port")
+    proxy_url = st.text_input("代理地址 (可选)", 
+                            value="http://127.0.0.1:7890",
+                            help="格式：http://ip:port")
     base_url = "https://api.deepseek.com/"
     #blockchair_key = st.text_input("Blockchair API Key", type="password", 
     #                             help="从blockchair.com获取免费API密钥")
      # 示例部分保持不变 ...
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = ''
+    
+    api_key = st.text_input(
+        "DeepSeek API密钥",
+        type="password",
+        value=st.session_state.api_key,
+        help="密钥不会存储，刷新页面后需要重新输入"
+    )
+    
+    # 添加安全警告
+    st.markdown("""
+    <div style="color: #ff4b4b; font-size: 0.8em; margin-top: -10px;">
+    注意：请勿在公共设备保存密钥
+    </div>
+    """, unsafe_allow_html=True)
+
+# 在代码中使用前添加验证
+if not api_key.startswith('sk-'):
+    st.error("无效的API密钥格式")
+    st.stop()
 # 修改后的比特币数据获取函数
 def fetch_bitcoin_data(metric, days=30):
-    end_date = datetime.now()
+    # 初始化日期范围（UTC时区）
+    end_date = datetime.now(pytz.utc)
     start_date = end_date - timedelta(days=days)
     
     # 确保日期范围不超过Bitaps限制（2年）
     if days > 730:
         st.error("Bitaps API最多支持查询2年历史数据")
-        return None
+        return pd.DataFrame()
+
+    all_blocks = []
     
-    # 添加时区处理
-    tz = pytz.timezone('UTC')
-    start_date = tz.localize(start_date)
-    end_date = tz.localize(end_date)
-    
-    url = "https://api.bitaps.com/btc/v1/blockchain/block/date"
-    params = {
-        "date_from": start_date.strftime('%Y-%m-%d'),
-        "date_to": end_date.strftime('%Y-%m-%d')
-    }
-    
-    try:
-        response = requests.get(
-            url, 
-            params=params,
-            proxies={
-                "http": "http://127.0.0.1:7890",
-                "https": "http://127.0.0.1:7890"
-            },
-            verify=False  # 如果使用自签名证书需要此项
-        )
-        response.raise_for_status()
-        raw_data = response.json().get('data')
-        
-        # 处理空数据情况
-        if not raw_data:
-            st.warning("所选日期范围内无可用数据")
-            return pd.DataFrame(columns=['date', 'transaction_count', 'size'])
+    # 按天循环请求
+    current_date = start_date
+    while current_date <= end_date:
+        try:
+            # 转换日期格式为API要求的路径参数
+            day_str = current_date.strftime('%Y%m%d')
+            url = f"https://api.bitaps.com/btc/v1/blockchain/blocks/day/{day_str}"
             
-        # ... 原有数据处理代码 ...
-        # 新增数据处理代码
-        processed_data = []
-        for date_str, daily_data in raw_data.items():
-            try:
-                # 转换日期格式
-                date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            # 分页参数
+            params = {
+                "limit": 100,
+                "offset": 0
+            }
+            
+            # 处理分页
+            while True:
+                response = requests.get(
+                    url,
+                    params=params,
+                    proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
+                    verify=False,
+                    timeout=15
+                )
+                response.raise_for_status()
                 
-                # 提取交易数量和区块大小（单位转换为MB）
-                transaction_count = daily_data.get('transactions', 0)
-                block_size = round(daily_data.get('size', 0) / (1024 * 1024), 2)  # 字节转MB
+                data = response.json().get('data', {})
                 
-                processed_data.append({
-                    'date': date,
-                    'transaction_count': transaction_count,
-                    'size': block_size
-                })
-            except (ValueError, TypeError) as e:
-                st.warning(f"数据解析错误：{str(e)}")
-                continue
-                
-        df = pd.DataFrame(processed_data)
-        df.sort_values('date', inplace=True)  # 按日期排序
-        return df        
-    except requests.exceptions.HTTPError as e:
-        error_msg = response.json().get('message', '未知错误')
-        st.error(f"API请求失败 ({e.response.status_code}): {error_msg}")
-        return None
+                if 'blocks' in data:
+                    all_blocks.extend(data['blocks'])
+                    
+                    # 更新分页参数
+                    if data.get('pagination', {}).get('next'):
+                        params['offset'] += params['limit']
+                    else:
+                        break
+                else:
+                    break
+                    
+        except Exception as e:
+            st.error(f"获取{day_str}数据失败: {str(e)}")
+        
+        # 移动到下一天
+        current_date += timedelta(days=1)
+    
+    # ... 后续数据处理保持不变 ...
+
+    # 处理空数据情况
+    if not all_blocks:
+        st.warning("所选日期范围内无可用区块数据")
+        return pd.DataFrame(columns=['date', 'transaction_count', 'size'])
+
+    # 按文档结构处理区块数据
+    processed_data = []
+    for block in all_blocks:
+        try:
+            # 转换时间戳为日期（UTC时区）
+            block_date = datetime.utcfromtimestamp(block['time']).date()
+            
+            processed_data.append({
+                'date': block_date,
+                'transaction_count': block['tx_count'],
+                'size': block['size'] / (1024 * 1024)  # 转换为MB
+            })
+            
+        except KeyError as e:
+            st.warning(f"区块数据缺少必要字段: {str(e)}")
+            continue
+
+    # 按日期聚合数据
+    df = pd.DataFrame(processed_data)
+    df = df.groupby('date').agg({
+        'transaction_count': 'sum',
+        'size': 'sum'
+    }).reset_index()
+    
+    df.sort_values('date', inplace=True)
+    return df
     
 # 主界面
 st.title("📊 智能图表生成器")
